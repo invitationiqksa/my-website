@@ -3,6 +3,10 @@ import { useState, useEffect, useRef } from "react"
 const WHATSAPP_IRAQ = "9647718031245"
 const WHATSAPP_KSA = "966580690167"
 
+// رابط سكربت Google Apps Script المسؤول عن إنشاء الشيتات وإضافة تأكيدات الحضور
+const SHEETS_SCRIPT_URL =
+  "https://script.google.com/macros/s/AKfycbyweFj9nsC81jES_PGEwDnGiKL7rxTB78D-evgZ0yisT4HptdqdHIqkyban5c39rvlN/exec"
+
 // بيانات دخول الأدمن — هذي حماية من طرف المتصفح فقط، غيّرها قبل النشر
 // ولو بتربط الموقع بسيرفر حقيقي، استبدلها بتسجيل دخول فعلي (مثلاً NextAuth أو Supabase Auth)
 const ADMIN_USERNAME = "mfofo1414"
@@ -94,6 +98,8 @@ interface Invitation {
   tag: string
   price: string
   verse: string
+  sheetId?: string
+  sheetUrl?: string
   // حقول اختيارية خاصة بقالب "وصال" (باب متحرك) — لو الدعوة تستخدمه
   templateType?: "wisal"
   heroBg?: string
@@ -180,8 +186,9 @@ function getTimeLeft(targetIso?: string) {
   const seconds = Math.floor((diff % (1000 * 60)) / 1000)
   return { days, hours, minutes, seconds }
 }
-
-function OrnamentSVG({ color, scale = 1 }: { color: string scale?: number }) {
+function OrnamentSVG(
+  { color, scale = 1 }: { color: string, scale?: number }
+) {
   return (
     <svg
       width={120 * scale}
@@ -212,7 +219,9 @@ function OrnamentSVG({ color, scale = 1 }: { color: string scale?: number }) {
   )
 }
 
-function CornerOrnament({ color, flip }: { color: string flip?: boolean }) {
+function CornerOrnament(
+  { color, flip }: { color: string, flip?: boolean }
+) {
   return (
     <svg
       width="60"
@@ -297,7 +306,7 @@ function WisalTemplateView({ inv }: { inv: Invitation }) {
   const [guestNote, setGuestNote] = useState("")
   const [submitted, setSubmitted] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [rsvpError, setRsvpError] = useState(false)
+  const [submitError, setSubmitError] = useState(false)
   const [showFlash, setShowFlash] = useState(false)
   // تبقى طبقة الفتح موجودة بالـ DOM فقط أثناء التلاشي (نفس مدة الترانزيشن)،
   // وبعدها تنشال نهائياً حتى ما تبقى فوق المحتوى وتمنع السكرول لأي سبب
@@ -372,42 +381,44 @@ function WisalTemplateView({ inv }: { inv: Invitation }) {
     }
   }
 
+  // إرسال تأكيد الحضور: يترسل فعلياً للشيت بس لو الدعوة عندها sheetId
+  // (يعني دعوة خاصة اتنشأت من لوحة التحكم). الدعوات العامة أو "جرّب دعوتك"
+  // ما عندها sheetId، فبتبقى معاينة محلية فقط بدون أي إرسال.
   const handleRSVP = async (e: React.FormEvent) => {
     e.preventDefault()
-    setRsvpError(false)
-    setSubmitting(true)
-    try {
-      const scriptUrl = import.meta.env.VITE_RSVP_SCRIPT_URL as
-        | string
-        | undefined
-      if (!scriptUrl) {
-        // ما فيه رابط Google Apps Script مضبوط بملف .env — راجع ملف
-        // RSVP_SETUP.md المرفق بجذر المشروع لخطوات الإعداد
-        throw new Error("Missing VITE_RSVP_SCRIPT_URL")
+    setSubmitError(false)
+
+    if (inv.sheetId) {
+      setSubmitting(true)
+      try {
+        const res = await fetch(SHEETS_SCRIPT_URL, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: JSON.stringify({
+            action: "addGuest",
+            sheetId: inv.sheetId,
+            name: guestName,
+            attendance,
+            companions,
+            message: guestNote,
+          }),
+        })
+        const result = await res.json().catch(() => null)
+        if (result && result.success === false) {
+          setSubmitError(true)
+          setSubmitting(false)
+          return
+        }
+      } catch (err) {
+        console.error("RSVP submit error:", err)
+        setSubmitError(true)
+        setSubmitting(false)
+        return
       }
-      await fetch(scriptUrl, {
-        method: "POST",
-        mode: "no-cors",
-        headers: { "Content-Type": "text/plain" },
-        body: JSON.stringify({
-          invitationId: inv.id,
-          invitationTitle: inv.title,
-          guestName,
-          attendance,
-          companions,
-          guestNote,
-        }),
-      })
-      // ملاحظة: mode: "no-cors" يمنعنا من قراءة محتوى الاستجابة أو حتى
-      // معرفة كود الحالة (status) بسبب قيود المتصفح مع Apps Script —
-      // لذلك نفترض النجاح إذا ما رمى fetch نفسه استثناء (خطأ شبكة).
-      // هذا قيد معروف بهذا الحل، مو خطأ بالكود.
-      setSubmitted(true)
-    } catch {
-      setRsvpError(true)
-    } finally {
       setSubmitting(false)
     }
+
+    setSubmitted(true)
   }
 
   return (
@@ -776,18 +787,18 @@ function WisalTemplateView({ inv }: { inv: Invitation }) {
                       />
                     </div>
 
-                    {rsvpError && (
-                      <div className="text-center py-2 text-red-600 text-sm font-medium">
-                        صار خطأ أثناء إرسال تأكيدك، حاول مرة ثانية 🙏
-                      </div>
+                    {submitError && (
+                      <p className="text-sm text-red-500 text-center -mt-3">
+                        تعذّر إرسال التأكيد، حاول مرة أخرى
+                      </p>
                     )}
 
                     <button
                       type="submit"
                       disabled={submitting}
-                      className="w-full py-4 bg-[#B8862F] hover:bg-[#9E7024] disabled:opacity-60 disabled:cursor-not-allowed text-white font-bold rounded-2xl text-base transition shadow-md"
+                      className="w-full py-4 bg-[#B8862F] hover:bg-[#9E7024] text-white font-bold rounded-2xl text-base transition shadow-md disabled:opacity-60"
                     >
-                      {submitting ? "جاري الإرسال..." : "إرسال التأكيد"}
+                      {submitting ? "جارٍ الإرسال..." : "إرسال التأكيد"}
                     </button>
                   </form>
                 )}
@@ -1756,7 +1767,11 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   // إنشاء دعوة خاصة جديدة اعتماداً على تصميم دعوة موجودة بالضبط (نفس الخلفيات
   // والصور والفيديوهات والألوان) — بس بتفاصيل نصية جديدة. ما فيه أي أسماء
   // ملفات جديدة لازم تُرفع لأننا نستخدم نفس ملفات القالب المختار.
-  const handleCreateFromTemplate = (draft: CreateDetailsDraft) => {
+  //
+  // كل دعوة خاصة تاخذ شيت خاص فيها (createSheet) — هذا الشيت هو اللي راح
+  // تتخزن فيه تأكيدات الحضور (RSVP) لما الضيوف يعبّون النموذج، عن طريق
+  // action: "addGuest" داخل WisalTemplateView.
+  const handleCreateFromTemplate = async (draft: CreateDetailsDraft) => {
     if (!createTemplate) return
 
     const newInv: Invitation = {
@@ -1768,6 +1783,28 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
       subtitle: `${draft.groom} و${draft.bride}`,
       tag: "خاصة",
       price: "-",
+    }
+
+    try {
+      const response = await fetch(SHEETS_SCRIPT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain",
+        },
+        body: JSON.stringify({
+          action: "createSheet",
+          title: newInv.title,
+        }),
+      })
+
+      const result = await response.json()
+
+      if (result.success) {
+        newInv.sheetId = result.sheetId
+        newInv.sheetUrl = result.sheetUrl
+      }
+    } catch (error) {
+      console.error("Create Sheet Error:", error)
     }
 
     const updated = [...list, newInv]
@@ -1938,10 +1975,25 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
                         خاصة — غير ظاهرة بالموقع
                       </span>
                     )}
+                    {inv.unlisted && !inv.sheetId && (
+                      <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-red-100 text-red-600">
+                        بدون شيت — RSVP ما راح ينحفظ
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-muted-foreground">{inv.title}</p>
                 </div>
                 <div className="flex items-center gap-2">
+                  {inv.unlisted && inv.sheetUrl && (
+                    <a
+                      href={inv.sheetUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-4 py-2 rounded-full text-xs font-bold border border-border"
+                    >
+                      فتح الشيت
+                    </a>
+                  )}
                   {inv.unlisted && (
                     <button
                       onClick={() => copyShareLink(inv)}
@@ -2045,7 +2097,8 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
                 </h2>
                 <p className="text-xs text-muted-foreground mb-4">
                   ما تظهر بشبكة الدعوات بالصفحة الرئيسية — تنفتح فقط لمن يملك
-                  رابطها
+                  رابطها. تأكيدات الحضور (RSVP) بتنحفظ بالشيت المرتبط بكل دعوة
+                  خاصة تلقائياً.
                 </p>
                 {privateList.length === 0 ? (
                   <p className="text-sm text-muted-foreground">
@@ -2108,6 +2161,10 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
           بالضبط، فما تحتاج ترفع أي ملفات جديدة. زر "تكرار" وحده هو اللي يولّد
           أسماء ملفات جديدة (لأنه يفترض تصميم مستقل)، وبهاي الحالة لازم ترفعها
           يدوياً بنفس الاسم داخل public/images و public/mnbra و public/videos.
+          <br />
+          ⚠️ تأكيدات الحضور (RSVP) تترسل فقط للدعوات الخاصة اللي عندها شيت
+          (sheetId) — الدعوات العامة و"جرّب دعوتك" تضل معاينة محلية فقط بدون
+          إرسال، حسب طلبك.
         </p>
       </div>
     </div>
@@ -2141,6 +2198,11 @@ function TryInvitationForm({
       bride,
       subtitle: `${groom} و${bride}`,
       venue: venue || base.venue,
+      // نتأكد إن دعوة التجربة ما عندها sheetId أبداً، حتى لو كان القالب
+      // الأصلي (اللي بنيت عليه) دعوة خاصة عندها شيت — عشان RSVP بوضع
+      // التجربة يضل محلي بس وما ينرسل لأي شيت
+      sheetId: undefined,
+      sheetUrl: undefined,
     }
     onLaunch(trialInv)
   }
